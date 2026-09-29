@@ -1,3 +1,280 @@
+#!/usr/bin/env bash
+
+set -e
+
+echo "🚀 Ajout des fonctionnalités Video Chat..."
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+PROJECT_DIR="mini-laravel-video-chat"
+FRONTEND_DIR="$PROJECT_DIR/frontend"
+CALL_SERVICE="$PROJECT_DIR/services/call"
+
+# ============================================================
+# VERIFICATION
+# ============================================================
+
+if [ ! -d "$PROJECT_DIR" ]; then
+    echo "❌ Projet introuvable : $PROJECT_DIR"
+    echo ""
+    echo "Lance ce script depuis le dossier parent."
+    exit 1
+fi
+
+if [ ! -f "$FRONTEND_DIR/package.json" ]; then
+    echo "❌ Frontend Vue introuvable."
+    exit 1
+fi
+
+if [ ! -d "$CALL_SERVICE" ]; then
+    echo "❌ Laravel Call Service introuvable : $CALL_SERVICE"
+    exit 1
+fi
+
+echo "✅ Projet détecté"
+
+# ============================================================
+# 1. LARAVEL CALL SERVICE
+# ============================================================
+
+echo ""
+echo "📦 Configuration du Call Service..."
+
+cd "$CALL_SERVICE"
+
+# ------------------------------------------------------------
+# Model Room
+# ------------------------------------------------------------
+
+mkdir -p app/Models
+mkdir -p app/Http/Controllers
+
+cat > app/Models/Room.php <<'EOF'
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Str;
+
+class Room extends Model
+{
+    protected $fillable = [
+        'room_id',
+        'name',
+    ];
+
+    protected static function booted()
+    {
+        static::creating(function ($room) {
+            if (!$room->room_id) {
+                $room->room_id = (string) Str::uuid();
+            }
+        });
+    }
+}
+EOF
+
+# ------------------------------------------------------------
+# Migration
+# ------------------------------------------------------------
+
+mkdir -p database/migrations
+
+TIMESTAMP=$(date +%Y_%m_%d_%H%M%S)
+
+cat > "database/migrations/${TIMESTAMP}_create_rooms_table.php" <<'EOF'
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('rooms', function (Blueprint $table) {
+            $table->id();
+
+            $table->uuid('room_id')
+                ->unique();
+
+            $table->string('name')
+                ->nullable();
+
+            $table->timestamps();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('rooms');
+    }
+};
+EOF
+
+# ------------------------------------------------------------
+# Controller
+# ------------------------------------------------------------
+
+cat > app/Http/Controllers/RoomController.php <<'EOF'
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Room;
+use Illuminate\Http\Request;
+
+class RoomController extends Controller
+{
+    public function store(Request $request)
+    {
+        $room = Room::create([
+            'name' => $request->input('name'),
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'room' => [
+                'id' => $room->room_id,
+                'name' => $room->name,
+            ],
+        ], 201);
+    }
+
+    public function show(string $roomId)
+    {
+        $room = Room::where('room_id', $roomId)->first();
+
+        if (!$room) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Room not found',
+            ], 404);
+        }
+
+        return response()->json([
+            'success' => true,
+            'room' => [
+                'id' => $room->room_id,
+                'name' => $room->name,
+            ],
+        ]);
+    }
+
+    public function destroy(string $roomId)
+    {
+        $room = Room::where('room_id', $roomId)->first();
+
+        if (!$room) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Room not found',
+            ], 404);
+        }
+
+        $room->delete();
+
+        return response()->json([
+            'success' => true,
+        ]);
+    }
+}
+EOF
+
+# ------------------------------------------------------------
+# API routes
+# ------------------------------------------------------------
+
+mkdir -p routes
+
+if [ ! -f routes/api.php ]; then
+    touch routes/api.php
+fi
+
+if ! grep -q "RoomController" routes/api.php; then
+
+cat >> routes/api.php <<'EOF'
+
+use App\Http\Controllers\RoomController;
+
+Route::post('/rooms', [RoomController::class, 'store']);
+Route::get('/rooms/{roomId}', [RoomController::class, 'show']);
+Route::delete('/rooms/{roomId}', [RoomController::class, 'destroy']);
+EOF
+
+fi
+
+# ------------------------------------------------------------
+# Migration
+# ------------------------------------------------------------
+
+echo ""
+echo "🗄️ Migration Laravel..."
+
+php artisan migrate --force || {
+    echo ""
+    echo "⚠️ Migration impossible."
+    echo "Vérifie la connexion PostgreSQL dans services/call/.env"
+    echo ""
+}
+
+cd "../../.."
+
+# ============================================================
+# 2. FRONTEND
+# ============================================================
+
+echo ""
+echo "🎨 Configuration du frontend..."
+
+cd "$FRONTEND_DIR"
+
+# ------------------------------------------------------------
+# Vue Router
+# ------------------------------------------------------------
+
+npm install vue-router
+
+# ------------------------------------------------------------
+# main.js
+# ------------------------------------------------------------
+
+cat > src/main.js <<'EOF'
+import { createApp } from 'vue'
+import { createRouter, createWebHistory } from 'vue-router'
+
+import App from './App.vue'
+
+const routes = [
+    {
+        path: '/',
+        component: App
+    },
+    {
+        path: '/room/:roomId',
+        component: App
+    }
+]
+
+const router = createRouter({
+    history: createWebHistory(),
+    routes
+})
+
+createApp(App)
+    .use(router)
+    .mount('#app')
+EOF
+
+# ------------------------------------------------------------
+# App.vue
+# ------------------------------------------------------------
+
+cat > src/App.vue <<'EOF'
 <script setup>
 
 import {
@@ -1119,3 +1396,57 @@ button:disabled {
 }
 
 </style>
+EOF
+
+# ============================================================
+# 3. FRONTEND ENV
+# ============================================================
+
+echo ""
+echo "🔧 Configuration environnement..."
+
+if [ ! -f .env ]; then
+    cat > .env <<'EOF'
+VITE_SIGNALING_URL=ws://localhost:3000
+VITE_CALL_API_URL=http://localhost:8002/api
+EOF
+else
+
+    if ! grep -q "^VITE_CALL_API_URL=" .env; then
+        echo "VITE_CALL_API_URL=http://localhost:8002/api" >> .env
+    fi
+
+fi
+
+# ============================================================
+# FIN
+# ============================================================
+
+echo ""
+echo "=============================================="
+echo "✅ FONCTIONNALITÉS INSTALLÉES"
+echo "=============================================="
+echo ""
+echo "Frontend :"
+echo "  cd $FRONTEND_DIR"
+echo "  npm run dev -- --host 0.0.0.0"
+echo ""
+echo "Call API :"
+echo "  cd $CALL_SERVICE"
+echo "  php artisan serve --host=0.0.0.0 --port=8002"
+echo ""
+echo "Signaling :"
+echo "  docker compose up -d --build signaling"
+echo ""
+echo "=============================================="
+echo "Fonctionnalités :"
+echo "  ✅ Création de room"
+echo "  ✅ URL partageable"
+echo "  ✅ Rejoindre une room"
+echo "  ✅ WebRTC"
+echo "  ✅ Micro ON/OFF"
+echo "  ✅ Caméra ON/OFF"
+echo "  ✅ Raccrocher"
+echo "  ✅ API Laravel Rooms"
+echo "=============================================="
+echo ""
